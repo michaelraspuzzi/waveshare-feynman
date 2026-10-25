@@ -1,0 +1,8 @@
+numpy
+pillow
+cairosvg
+aiohttp
+mlx-whisper
+anthropic
+esptool
+pyserial

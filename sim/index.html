@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feynman Tutor Simulator</title>
+<style>
+  :root { --bg: #15151a; --ink: #e8e6e1; --dim: #8a8983; --accent: #b993ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+         font: 15px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 16px; }
+  .device { width: min(480px, 100%); aspect-ratio: 1; border-radius: 9%; background: #000; position: relative;
+            overflow: hidden; box-shadow: 0 0 0 14px #f2f2f0, 0 20px 50px rgba(0,0,0,.6); }
+  canvas { width: 100%; height: 100%; display: block; }
+  .sub { position: absolute; left: 6%; right: 6%; bottom: 4%; min-height: 15%; display: flex; align-items: flex-end;
+         justify-content: center; text-align: center; font-size: clamp(14px, 4.6vw, 22px); font-weight: 600;
+         line-height: 1.25; text-shadow: 0 1px 3px #000; }
+  .mode { position: absolute; top: 4%; right: 6%; font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+          padding: 4px 10px; border-radius: 99px; background: #222; color: var(--dim); }
+  .mode.listening { background: #3a1d1d; color: #ff8a8a; }
+  .mode.thinking { background: #2a2340; color: var(--accent); }
+  .mode.answering { background: #1d3a26; color: #7be38f; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button { font: inherit; padding: 10px 18px; border-radius: 10px; border: 1px solid #333; background: #222; color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: #111; border-color: transparent; font-weight: 600; }
+  .home { position: absolute; inset: 0; background: #000; display: none; flex-direction: column; align-items: center;
+          justify-content: center; gap: 18px; }
+  .home h2 { margin: 0; color: var(--accent); font-size: 26px; }
+  .home .card { width: 82%; text-align: left; padding: 18px 20px; border-radius: 20px; border: 2px solid var(--accent);
+                background: #121216; color: var(--ink); cursor: pointer; }
+  .home .card b { display: block; font-size: 24px; } .home .card span { color: var(--dim); font-size: 14px; }
+  .log { font: 12px ui-monospace, Menlo, monospace; color: var(--dim); width: min(480px, 100%); max-height: 160px; overflow: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <div class="device">
+    <canvas id="screen" width="480" height="480"></canvas>
+    <div class="mode" id="mode">offline</div>
+    <div class="sub" id="sub"></div>
+    <div class="home" id="home">
+      <h2>Feynman Tutor</h2>
+      <div class="card" id="resume"><b>Quantum Behavior</b><span id="resumeAt">tap to start</span></div>
+      <button id="restart">Start over</button>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="primary" id="start">Start lecture</button>
+    <button id="ask">Interrupt / ask (space)</button>
+    <button id="homeBtn">Home (H)</button>
+  </div>
+  <div class="log" id="log"></div>
+<script>
+const RATE = 16000, ANSWER = 0xFFFFFFFF;
+const $ = id => document.getElementById(id);
+const ctx2d = $("screen").getContext("2d");
+const images = new Map();
+let total = 0, ws, ac, mode = "offline", nextTime = 0, sources = [], timers = [], playedPos = 0, micNode;
+
+function log(s) { $("log").textContent = `${new Date().toLocaleTimeString()} ${s}\n` + $("log").textContent; }
+function setMode(m) { mode = m; $("mode").textContent = m; $("mode").className = "mode " + m; }
+
+let fb = null, flushGen = 0, frameChain = Promise.resolve();
+
+function put565(d, i, v) {
+  d[i*4] = (v >> 11) << 3; d[i*4+1] = ((v >> 5) & 63) << 2; d[i*4+2] = (v & 31) << 3; d[i*4+3] = 255;
+}
+
+function drawImage(id) {
+  const px = images.get(id); if (!px) return log("missing image " + id);
+  fb = ctx2d.createImageData(480, 480);
+  for (let i = 0; i < px.length; i++) put565(fb.data, i, px[i]);
+  ctx2d.putImageData(fb, 0, 0);
+}
+
+async function inflate(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint16Array(await new Response(stream).arrayBuffer());
+}
+
+// Animation frame: dirty rects that patch the image on screen, applied when playback reaches them.
+function onFrame(buf) {
+  const target = Math.max(nextTime, ac.currentTime), gen = flushGen;
+  frameChain = frameChain.then(async () => {
+    const v = new DataView(buf), n = v.getUint8(1), rects = [];
+    let off = 2;
+    for (let i = 0; i < n; i++) {
+      const x = v.getUint16(off, true), y = v.getUint16(off + 2, true), w = v.getUint16(off + 4, true),
+            h = v.getUint16(off + 6, true), len = v.getUint32(off + 8, true);
+      rects.push({ x, y, w, h, px: await inflate(new Uint8Array(buf, off + 12, len)) });
+      off += 12 + len;
+    }
+    timers.push(setTimeout(() => {
+      if (gen !== flushGen || !fb) return;
+      for (const r of rects) {
+        for (let row = 0; row < r.h; row++)
+          for (let col = 0; col < r.w; col++) put565(fb.data, (r.y + row) * 480 + r.x + col, r.px[row * r.w + col]);
+        ctx2d.putImageData(fb, 0, 0, r.x, r.y, r.w, r.h);
+      }
+    }, Math.max(0, (target - ac.currentTime) * 1000)));
+  });
+}
+
+// In-band events fire when playback reaches them: schedule at the current end of the audio queue.
+function at(fn) {
+  const delay = Math.max(0, (nextTime - ac.currentTime) * 1000);
+  timers.push(setTimeout(fn, delay));
+}
+
+function onEvent(m) {
+  if (m.t === "flush") return flush();
+  if (m.t === "hello") { total = m.total || 0; return log(`connected: ${m.title}`); }
+  if (mode === "home") return;               // paused: drop anything still in flight
+  at(() => {
+    if (m.t === "sub") $("sub").textContent = m.text;
+    else if (m.t === "show") drawImage(m.id);
+    else if (m.t === "mode") setMode(m.mode);
+  });
+}
+
+function onAudio(buf) {
+  const view = new DataView(buf), pos = view.getUint32(1, true);
+  const pcm = new Int16Array(buf.slice(5));
+  const ab = ac.createBuffer(1, pcm.length, RATE), ch = ab.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = ac.createBufferSource(); src.buffer = ab; src.connect(ac.destination);
+  nextTime = Math.max(nextTime, ac.currentTime + 0.05);
+  src.start(nextTime);
+  if (pos !== ANSWER) timers.push(setTimeout(() => { playedPos = pos; }, (nextTime - ac.currentTime) * 1000));
+  nextTime += ab.duration;
+  sources.push(src); src.onended = () => sources.splice(sources.indexOf(src), 1);
+}
+
+function flush() {
+  flushGen++;
+  sources.forEach(s => { try { s.stop(); } catch {} }); sources = [];
+  timers.forEach(clearTimeout); timers = []; nextTime = 0;
+}
+
+async function connect() {
+  ac = ac || new AudioContext({ sampleRate: RATE });
+  await ac.resume();
+  ws = new WebSocket(`ws://${location.host}/ws`); ws.binaryType = "arraybuffer";
+  ws.onopen = () => { ws.send(JSON.stringify({ t: "hello", device: "sim" })); ws.send(JSON.stringify({ t: "start" })); };
+  ws.onclose = () => { setMode("offline"); log("disconnected"); };
+  ws.onmessage = e => {
+    if (typeof e.data === "string") return onEvent(JSON.parse(e.data));
+    const b = new Uint8Array(e.data);
+    if (mode === "home" && b[0] !== 2) return;
+    if (b[0] === 1) onAudio(e.data);
+    else if (b[0] === 2) {
+      const n = b[1], id = new TextDecoder().decode(b.slice(2, 2 + n));
+      images.set(id, new Uint16Array(e.data.slice(2 + n)));
+    }
+    else if (b[0] === 3) onFrame(e.data);
+  };
+}
+
+async function ensureMic() {
+  if (micNode) return;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  const srcNode = ac.createMediaStreamSource(stream);
+  micNode = ac.createScriptProcessor(2048, 1, 1);
+  micNode.onaudioprocess = e => {
+    if (mode !== "listening" || !ws || ws.readyState !== 1) return;
+    const f = e.inputBuffer.getChannelData(0), pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767;
+    const frame = new Uint8Array(1 + pcm.byteLength); frame[0] = 0x10; frame.set(new Uint8Array(pcm.buffer), 1);
+    ws.send(frame);
+  };
+  srcNode.connect(micNode); micNode.connect(ac.destination);
+}
+
+async function press() {
+  if (!ws || ws.readyState !== 1) return;
+  if (mode === "home") return;
+  if (mode !== "listening") { flush(); setMode("listening"); $("sub").textContent = ""; }
+  try { await ensureMic(); } catch (e) { log("mic unavailable: " + e.message); }
+  ws.send(JSON.stringify({ t: "interrupt", pos: playedPos }));
+}
+
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+function goHome() {
+  if (!ws || ws.readyState !== 1 || mode === "home") return;
+  flush(); setMode("home");
+  $("resumeAt").textContent = playedPos ? `resume  ${mmss(playedPos / RATE)} / ${mmss(total / RATE)}` : "tap to start";
+  $("home").style.display = "flex";
+  ws.send(JSON.stringify({ t: "home", pos: playedPos }));
+}
+function leaveHome(msg) { $("home").style.display = "none"; $("sub").textContent = ""; setMode("idle"); ws.send(JSON.stringify(msg)); }
+$("homeBtn").onclick = goHome;
+$("resume").onclick = () => leaveHome({ t: "resume" });
+$("restart").onclick = () => leaveHome({ t: "start" });
+document.addEventListener("keydown", e => { if (e.code === "KeyH" && !e.repeat) goHome(); });
+$("start").onclick = async () => { if (ws) ws.close(); playedPos = 0; await connect(); };
+$("ask").onclick = press;
+document.addEventListener("keydown", e => { if (e.code === "Space" && !e.repeat) { e.preventDefault(); press(); } });
+</script>
+</body>
+</html>

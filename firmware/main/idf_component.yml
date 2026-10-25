@@ -1,0 +1,8 @@
+dependencies:
+  idf: ">=5.5.0"
+  waveshare/esp32_s3_touch_amoled_2_16:
+    version: "^2.0.1"
+    # local copy: display draw buffers moved to internal DMA RAM (see the comment in its .c)
+    override_path: "../components/esp32_s3_touch_amoled_2_16"
+  lvgl/lvgl: "9.*"
+  chmorgan/esp-libhelix-mp3: "^1.0.3"

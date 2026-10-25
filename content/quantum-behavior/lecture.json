@@ -1,0 +1,121 @@
+{
+  "id": "quantum-behavior",
+  "title": "Quantum Behavior",
+  "note": "Original lecture written in the style of Feynman's Caltech lectures. Not a transcript; to be replaced by the real recording of lecture #37 (4/3/62).",
+  "segments": [
+    {
+      "visual": "00-title",
+      "lines": [
+        "Today we're going to talk about how very small things behave.",
+        "And I'll warn you right at the start: they don't behave like anything you've ever seen.",
+        "Not like little billiard balls. Not like waves on a pond. Not like springs, or clouds, or anything else.",
+        "So you're going to have to put up with that.",
+        "I can't explain it to you in terms of something familiar, because there isn't anything familiar.",
+        "What I can do is tell you exactly what happens. And then you'll know as much as anybody."
+      ]
+    },
+    {
+      "visual": "01-bullets",
+      "lines": [
+        "Let's start with an experiment we understand. Bullets.",
+        "We have a gun that sprays bullets in all directions, not very accurately.",
+        "In front of it there's an armor plate with two holes in it.",
+        "And behind that, a backstop, with a little box that catches bullets, and we can slide that box up and down.",
+        "We count how many bullets land in the box at each position. That gives us a probability.",
+        "Now, bullets come in lumps. You get one bullet or two bullets. You never get half a bullet.",
+        "If we close hole two, we get a curve from hole one alone. Call it P one.",
+        "Close hole one, we get P two.",
+        "Open both, and what do you get? Well, you just add them up. P one plus P two.",
+        "Every bullet went through one hole or the other. Nothing strange. Good."
+      ]
+    },
+    {
+      "visual": "02-waves",
+      "lines": [
+        "Now let's do the same thing with water waves.",
+        "A little thing bobbing up and down in a pool makes circular waves.",
+        "Same wall, same two holes. Each hole now acts like a new source of waves.",
+        "Instead of a box catching bullets, we measure how much the water jiggles. The intensity.",
+        "And the intensity can be any size at all. It doesn't come in lumps.",
+        "With one hole open, we get a nice smooth bump, just like before.",
+        "But with both holes open, we get this: big, small, big, small.",
+        "At some places the two waves arrive in step and help each other.",
+        "At other places one is going up while the other is going down, and they cancel.",
+        "That's interference. And notice: the answer is not I one plus I two.",
+        "You have to add the heights of the waves first, and then square. The cross term is the interference."
+      ]
+    },
+    {
+      "visual": "03-electrons",
+      "lines": [
+        "Now we do it with electrons.",
+        "An electron gun: a hot wire and a little voltage. Same wall, same two holes.",
+        "For a detector we put a little counter that goes click when an electron hits it.",
+        "And here's the first thing. The clicks are all the same size. Click. Click. Click.",
+        "Never half a click. So electrons come in lumps, like bullets.",
+        "Turn the gun down very low, and still each click is a whole electron.",
+        "So we move the counter around, and we count clicks, and we make our curve.",
+        "And what do we get? Big, small, big, small. The wave pattern.",
+        "Lumps when they arrive, but they add up with interference. Like waves.",
+        "That should bother you. It bothered everybody."
+      ]
+    },
+    {
+      "visual": "04-amplitudes",
+      "lines": [
+        "The rule that works is this. For each way the electron can go, there's a number. We call it an amplitude.",
+        "Phi one for going through hole one. Phi two for hole two.",
+        "These are complex numbers, little arrows if you like, with a length and a direction.",
+        "When there are two ways it can happen, and you don't know which, you add the arrows.",
+        "And then the probability is the length of the total arrow, squared.",
+        "If the arrows point the same way, you get a big answer. If they point opposite, they cancel, and you get nothing.",
+        "That's all there is to it. That's the rule. Nobody has found a deeper one."
+      ]
+    },
+    {
+      "visual": "05-watching",
+      "lines": [
+        "Now, you say, wait a minute. Each electron must go through one hole or the other.",
+        "Let's just look and see which one it goes through.",
+        "So we put a light behind the wall. When an electron goes by, it scatters some light, and we see a flash at hole one or at hole two.",
+        "And sure enough, every time, we see a flash at one hole or the other. Never both. Never half.",
+        "So we sort the clicks. The ones that went through hole one give P one. Hole two gives P two.",
+        "And the total, when we're watching? It's P one plus P two. The interference is gone.",
+        "Turn off the light, and the wiggles come back.",
+        "So the electron behaves differently when we look at it."
+      ]
+    },
+    {
+      "visual": "06-dim-light",
+      "lines": [
+        "Well, maybe our light is too strong. It knocks the electron around.",
+        "So let's make it gentler. Make the light dimmer.",
+        "But light comes in lumps too, photons. Dimmer light means fewer photons, not softer ones.",
+        "So sometimes the electron goes by and we miss it. No flash at all.",
+        "The ones we saw make P one plus P two. The ones we missed make interference.",
+        "Use longer wavelength light, so each photon gives a softer kick. Then the flash is so blurry you can't tell which hole it came from.",
+        "Right when you lose the ability to say which hole, the interference comes back.",
+        "Nature is very careful. You can never have both the which-way information and the wiggles."
+      ]
+    },
+    {
+      "visual": "07-uncertainty",
+      "lines": [
+        "This is the uncertainty principle at work.",
+        "It's not that our instruments are clumsy. Any way you could possibly find out which hole the electron went through will destroy the pattern.",
+        "If it were possible to beat this, the whole of quantum mechanics would fall apart. Nobody has ever found a way."
+      ]
+    },
+    {
+      "visual": "08-closing",
+      "lines": [
+        "So what do we know? We know how to calculate. Add the amplitudes for the ways you can't tell apart, then square.",
+        "If you can tell them apart, even in principle, add the probabilities instead.",
+        "And can we say how it really works underneath? What the machinery is? No.",
+        "We can only predict the odds. That's the best physics can do right now, and maybe it's the way nature is.",
+        "It's strange. But that's the way it is. And it agrees with every experiment ever done.",
+        "Next time, we'll start using these amplitudes for real."
+      ]
+    }
+  ]
+}
