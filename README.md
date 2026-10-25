@@ -1,84 +1,78 @@
-# Feynman Tutor on Waveshare ESP32-S3-Touch-AMOLED-2.16
+# Feynman Tutor on a Waveshare ESP32-S3 AMOLED
 
-The device streams a Feynman lecture with subtitles and explainer visuals. Press a button to interrupt and ask a question by voice, and the tutor answers.
+A pocket physics tutor. It plays an animated lecture on *Quantum Behavior*, in the spirit of Feynman's Caltech lectures, with narration, subtitles and explainer animations. Press the side button to interrupt and ask a question out loud, and a tutor in Feynman's style answers by voice before the lecture picks up again.
 
-## Hardware (read from the board on 2026-10-24)
+It runs on its own. The lecture lives in the board's flash and plays with no network. Questions go straight from the board to [OpenRouter](https://openrouter.ai) over Wi-Fi, home or phone hotspot. There's no server or computer involved.
 
-- **Port:** `/dev/cu.usbmodem101` (native USB-Serial/JTAG, VID 0x303A / PID 0x1001)
-- **Chip:** ESP32-S3 (QFN56) rev v0.2, dual-core 240 MHz, Wi-Fi + BLE 5
-- **Memory:** 8 MB embedded PSRAM, 16 MB quad flash
-- **MAC:** 90:70:69:fe:6d:04
-- **Factory firmware backup:** `backup/factory-firmware-16MB.bin`
-  - Restore it with: `.venv/bin/esptool --port /dev/cu.usbmodem101 write-flash 0 backup/factory-firmware-16MB.bin`
+Hardware: [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16): ESP32-S3R8, 16 MB flash, 8 MB PSRAM, a 480×480 AMOLED touchscreen, an ES8311 speaker codec, an ES7210 dual microphone and an AXP2101 battery chip. The speaker plugs into the 2-pin header.
 
-Docs: https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16
+## Controls
 
-### Pin map for this project
+| Control | Action |
+|---|---|
+| Side button | Press to ask a question; it stops listening when you pause. Or hold it while you talk and let go. |
+| Tap the screen | Same as the side button. |
+| Two swipes up | Home: pauses, and the card resumes where you were. |
+| BOOT | Tap to cycle volume. Hold 1.5 s to go home. |
 
-| Function | Part | Pins |
-|---|---|---|
-| Display 480×480 AMOLED | CO5300, QSPI | SIO0-3 = 4,5,6,7 · CLK 38 · CS 12 · RST 39 |
-| Touch | CST9220 | I2C · INT 11 · RST 40 |
-| Shared I2C | touch, AXP2101, QMI8658, PCF85063, ES8311, ES7210 | SCL 14 · SDA 15 |
-| Speaker DAC | ES8311 | MCLK 42 · BCLK 9 · LRCK 45 · DOUT 8 · PA enable 46 |
-| Mic array (2 mics, AEC) | ES7210 | MCLK 42 · BCLK 9 · LRCK 45 · DIN 10 |
-| User button (interrupt) | Key3 | GPIO18 (active low) |
-| BOOT / PWR | Key2 / Key1 | GPIO0 / PMIC |
-| SD card (SPI) | — | MOSI 1 · SCK 2 · MISO 3 · CS 41 |
-| PMIC / battery | AXP2101 | I2C |
-
-## Proposed architecture
-
-The ESP32-S3 can't run speech recognition or an LLM, so it acts as a thin client. A server does the rest.
+## How it works
 
 ```
- ┌──────── device (ESP32-S3) ────────┐        ┌──────────── server (laptop / cloud) ────────────┐
- │ LVGL UI: visual + subtitle strip  │◀─WS────│ lecture timeline: audio chunks, subtitle cues,  │
- │ I2S out → ES8311 → speaker        │        │ visual cues (SVG → 480×480 PNG/RGB565)           │
- │ GPIO18 / touch → "interrupt"      │──WS───▶│ pause lecture, receive mic audio                 │
- │ I2S in ← ES7210 mics (16 kHz)     │──WS───▶│ STT → Claude (Feynman tutor persona) → TTS       │
- └───────────────────────────────────┘        │ answer audio + subtitles + optional diagram      │
-                                              │ → resume the lecture where it stopped            │
-                                              └──────────────────────────────────────────────────┘
+content/quantum-behavior/lecture.json   the script: narration lines grouped into scenes
+tools/beats/*.py                        one animated scene per section, choreographed to the narration lines
+tools/render_lecture.py                 voice (Deepgram Aura-2 via OpenRouter) + 15 fps frames + subtitle timing
+tools/pack_lecture.py                   -> lecture.fqv: MP3 audio + FQV animation frames, in one flash image
+firmware/                               ESP-IDF 5.5 app: plays lecture.fqv, records questions, calls OpenRouter
 ```
 
-- **Visuals:** SVGs are authored here and rasterized on the server or at build time to 480×480 images. The device only shows bitmaps; rendering SVG on the chip is possible (LVGL 9 + ThorVG) but slow and memory-hungry.
-- **Subtitles:** timed cues (WebVTT-style) pushed with the audio and drawn as an LVGL label at the bottom of the round-corner square screen.
-- **Firmware:** ESP-IDF 5.x + LVGL 9 + `esp_codec_dev` for audio, built from Waveshare's demos for the display and codec bring-up.
+- **FQV** (`tools/fqv.py`) is a small animation codec built for this board. Each scene gets a 256-colour palette. Each frame stores only the 16×16 tiles that changed, deflated. 53 MB of raw frames come to about 10 MB, and the board decodes them straight from flash using the inflater in the ESP32-S3's ROM.
+- **Questions:** the board records with adaptive voice detection, then makes three OpenRouter calls:
+  - `deepgram/nova-3` for speech-to-text.
+  - `anthropic/claude-opus-5.5` as the tutor, which knows what you've heard so far and can pick a diagram to show.
+  - `deepgram/aura-2` for the voice, streamed sentence by sentence with subtitles.
 
-## Lecture content: findings (2026-10-24)
+  Then the lecture resumes at the start of the sentence you interrupted.
+- **Firmware layout:**
+  - `main.c`: UI, controls, home screen.
+  - `player.c`: one ordered queue for audio, subtitles and frames.
+  - `lecture.c`: reads the flash image.
+  - `ask.c`: questions.
+  - `net.c`: joins the strongest known Wi-Fi.
 
-- **Real recordings exist:** Caltech publishes all 122 original 1961–64 lecture tapes at https://www.feynmanlectures.caltech.edu/flptapes.html, along with each lecture's book chapter.
-- **They're streaming-only:** the audio is © Caltech and served from a `/protectedaudio/` path behind Cloudflare bot protection. We won't scrape or download it.
-- **Legitimate copies:** Basic Books released the tapes as audio CD sets (Hachette lists them, e.g. ISBN 9780738209289). Audio you own can be used on this personal device. We'd transcribe it locally with Whisper to get timed subtitles. Don't redistribute it.
-- **Fallback:** Claude writes an original lecture in Feynman's teaching style, voiced with a stock TTS voice. It doesn't clone his voice or reproduce the book text.
-- **Candidate first lecture:** #37 *Quantum behavior* (4/3/62), the double-slit experiment (FLP Vol. III ch. 1). It's iconic and suits diagrams.
+## Build it
 
-## How to run it
+Requirements: Python 3, ffmpeg, librsvg (`brew install ffmpeg librsvg`) and [ESP-IDF 5.5](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32s3/get-started/).
 
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+
+# 1. render and pack the lecture (voice clips are cached in cache/tts/)
+.venv/bin/python tools/render_lecture.py quantum-behavior
+.venv/bin/python tools/pack_lecture.py quantum-behavior
+
+# 2. Wi-Fi networks + OpenRouter key -> firmware/main/secrets.h (gitignored)
+tools/set_wifi.sh
+
+# 3. build and flash the app, then the lecture image into its partition
+source ~/esp/esp-idf/export.sh
+cd firmware && idf.py build
+../.venv/bin/esptool --port /dev/cu.usbmodem101 -b 921600 write-flash @build/flash_args \
+    0x290000 ../build/lectures/quantum-behavior/lecture.fqv
 ```
-content/quantum-behavior/   lecture.json (script, split into subtitle lines) + visuals/*.svg
-tools/make_visuals.py       generates the SVG diagrams
-tools/render_lecture.py     script -> audio.pcm + timeline.json + 480x480 RGB565 images (build/lectures/)
-server/                     aiohttp WebSocket server: paced streaming, interrupt, Whisper -> Claude -> TTS
-sim/index.html              browser simulator of the device (same protocol), served at http://localhost:8780
-firmware/                   ESP-IDF 5.5 app for the board (Waveshare BSP + LVGL 9 + esp_websocket_client)
-```
 
-1. Render the lecture after editing the script or diagrams:
-   ```
-   .venv/bin/python tools/make_visuals.py && .venv/bin/python tools/render_lecture.py quantum-behavior
-   ```
-2. Start the server: `.venv/bin/python -m server.app`. Then open http://localhost:8780, click Start, and press space to interrupt.
-3. Run the headless end-to-end test (interrupt, spoken question, answer, resume): `.venv/bin/python tools/test_client.py "your question"`.
-4. Firmware: put your Wi-Fi details in `firmware/main/secrets.h`, then:
-   ```
-   source ~/esp/esp-idf/export.sh && cd firmware && idf.py -p /dev/cu.usbmodem101 flash monitor
-   ```
+`tools/render_lecture.py` also writes `build/preview/quantum-behavior.mp4`, the whole lecture as a video, for checking animation changes without flashing. To preview a single scene, `.venv/bin/python tools/animate.py 02-waves` renders one frame per narration line.
 
-### Services and settings
+## Board notes
 
-- **Voice:** Deepgram Aura-2 `aura-2-draco-en` (British male) via OpenRouter. It uses `OPENROUTER_API_KEY` in `.env`, copied from jev-test. Set `FEYNMAN_VOICE` to try another Aura-2 voice. Clips are cached in `cache/tts/`. Without a key it falls back to macOS `say`.
-- **Speech-to-text:** Whisper small.en running locally via mlx-whisper.
-- **Answers:** Claude (`claude-opus-5-5`) through the Anthropic API if `ANTHROPIC_API_KEY` is set. Otherwise it uses the local `claude -p` CLI (`FEYNMAN_CLI_MODEL`, default sonnet).
-- **Swapping in the real recording later:** produce the same `audio.pcm` + `timeline.json` from the real audio. Whisper with word timestamps gives the subtitle cues; visual cues are added by hand. The server and firmware don't change.
+- `firmware/components/esp32_s3_touch_amoled_2_16` is Waveshare's BSP with one change: the display draw buffers are in internal DMA RAM. The stock PSRAM buffers make every flush bounce through a 48 KB internal block, which Wi-Fi starves.
+- The microphones are quiet, so the gain is set to the maximum (37.5 dB), the two mics are summed, and each question is normalized before speech-to-text.
+- The flash partitions are a 2.5 MB app and a 13.4 MB `lecture` data partition at `0x290000`.
+
+## Dev tools
+
+`server/` + `sim/` hold the earlier Mac-hosted version: a WebSocket server and a browser simulator of the device, at `http://localhost:8780`. They're handy for iterating on content: `.venv/bin/python -m server.app`.
+
+## Content note
+
+The lecture is an original script written in the style of Feynman's 1961–64 Caltech lectures. It isn't a transcript. The original recordings are © Caltech and published for streaming at [feynmanlectures.caltech.edu](https://www.feynmanlectures.caltech.edu/flptapes.html). To use a recording you own, transcribe it with timestamps into the same `lecture.json` / timeline format.
