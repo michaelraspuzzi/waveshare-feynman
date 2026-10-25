@@ -3,7 +3,8 @@
  *
  *   side button (GPIO18)   press: ask (stops when you pause; press again to finish early)
  *                          or hold while you talk and let go
- *   tap the screen         same as a side-button press
+ *   tap the screen         pause / play
+ *   drag left / right      rewind / fast-forward, with a timeline and chapter preview
  *   two swipes up          home (pauses; the card resumes where you were)
  *   BOOT button            tap: volume 40 / 60 / 75 / 90 / 100 %    hold 1.5 s: home
  *
@@ -30,6 +31,8 @@ volatile app_mode_t mode = MODE_IDLE;
 esp_codec_dev_handle_t spk, mic;
 
 static TaskHandle_t button_task_handle;
+static void timeline_hide(void);
+static void scrub_init(lv_obj_t *scr);
 static uint16_t *fb;
 static lv_image_dsc_t fb_dsc;
 static lv_obj_t *img, *sub_label, *mode_label, *note_label, *vol_label;
@@ -49,8 +52,8 @@ void ui_set_sub(const char *text) { lv_label_set_text(sub_label, text); }
 
 void ui_set_mode(app_mode_t m)
 {
-    static const char *names[] = {"", "", "LISTENING", "THINKING", "ANSWERING", "THE END", ""};
-    static const uint32_t colors[] = {0, 0, 0xff8a8a, 0xb993ff, 0x7be38f, 0x8a8983, 0};
+    static const char *names[] = {"", "", "LISTENING", "THINKING", "ANSWERING", "THE END", "", "PAUSED"};
+    static const uint32_t colors[] = {0, 0, 0xff8a8a, 0xb993ff, 0x7be38f, 0x8a8983, 0, 0xe8e6e1};
     if (mode == MODE_HOME && m != MODE_HOME) return;     /* paused: stale queue items can't take over */
     mode = m;
     if (names[m][0]) {
@@ -126,6 +129,7 @@ static void go_home(void)       /* lock held (LVGL callbacks) */
     if (played_pos) save_pos(played_pos);
     ui_set_mode(MODE_HOME);
     ui_set_sub("");
+    timeline_hide();
     refresh_home();
     lv_obj_remove_flag(home_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(home_panel);
@@ -203,16 +207,125 @@ static void home_init(lv_obj_t *scr)
 
     home_net = text_label(home_panel, &lv_font_montserrat_16, 0x7be38f, "");
     lv_obj_align(home_net, LV_ALIGN_BOTTOM_MID, 0, -78);
-    lv_obj_align(text_label(home_panel, &lv_font_montserrat_16, 0x55545a, "side button: ask  -  hold BOOT: home"),
+    lv_obj_align(text_label(home_panel, &lv_font_montserrat_16, 0x55545a, "ask: side button  -  pause: tap  -  seek: drag"),
                  LV_ALIGN_BOTTOM_MID, 0, -46);
 }
 
-/* ------------------------------------------------------------------ touch: taps and swipes
- * Tracked by hand from press/release points (logged, to check the touch orientation). */
+/* ------------------------------------------------------------------ pause, scrub, timeline
+ * Tap: pause / play. Drag sideways: scrub (1 px = 0.5 s) with a timeline, a big "-0:15" cue and the
+ * chapter name; crossing into another chapter previews its diagram. Let go to jump there.
+ * Swipe up twice: home. Touches are logged to check the panel orientation. */
 
+#define SCRUB_SAMPLES_PER_PX (RATE / 2)
+#define BAR_X  20
+#define BAR_W  400
+
+static lv_obj_t *scrub_panel, *bar_fill, *knob, *time_label, *chap_label, *cue_label, *play_icon;
 static lv_point_t press_pt;
-static bool swiped;
+static bool swiped, scrubbing, scrub_was_playing;
+static uint32_t scrub_from, scrub_to;
+static int scrub_scene;
 static TickType_t last_swipe_up;
+
+static void mmss(char *out, size_t n, uint32_t samples)
+{
+    unsigned s = samples / RATE;
+    snprintf(out, n, "%u:%02u", s / 60, s % 60);
+}
+
+static void timeline_show(uint32_t pos)   /* lock held */
+{
+    uint32_t total = lecture_total() ? lecture_total() : 1;
+    int x = (int)((uint64_t)pos * BAR_W / total);
+    lv_obj_set_width(bar_fill, x > 0 ? x : 1);
+    lv_obj_set_x(knob, BAR_X + x - 10);
+    char a[16], b[16];
+    mmss(a, sizeof(a), pos);
+    mmss(b, sizeof(b), total);
+    lv_label_set_text_fmt(time_label, "%s / %s", a, b);
+    lv_label_set_text(chap_label, lecture_scene_name(lecture_scene_at(pos)));
+    int cx = BAR_X + x - lv_obj_get_width(chap_label) / 2;
+    lv_obj_set_x(chap_label, cx < 8 ? 8 : cx > 440 - lv_obj_get_width(chap_label) ? 440 - lv_obj_get_width(chap_label) : cx);
+    lv_obj_add_flag(sub_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(scrub_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(scrub_panel);
+}
+
+static void timeline_hide(void)   /* lock held */
+{
+    lv_obj_add_flag(scrub_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(cue_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(play_icon, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(sub_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void pause_now(void)   /* lock held */
+{
+    lecture_stop();
+    play_flush();
+    ui_set_mode(MODE_PAUSED);
+    lv_obj_remove_flag(play_icon, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(play_icon);
+    timeline_show(played_pos);
+    save_pos(played_pos);
+}
+
+static void play_now(uint32_t from)   /* lock held */
+{
+    timeline_hide();
+    mode = MODE_IDLE;
+    lecture_play(from);
+}
+
+static void scrub_begin(void)   /* lock held */
+{
+    scrub_was_playing = mode == MODE_LECTURE;
+    scrub_from = scrub_to = played_pos;
+    scrub_scene = lecture_scene_at(played_pos);
+    if (scrub_was_playing) {
+        lecture_stop();
+        play_flush();
+        ui_set_mode(MODE_PAUSED);
+    }
+    lv_obj_add_flag(play_icon, LV_OBJ_FLAG_HIDDEN);
+    scrubbing = swiped = true;
+}
+
+static void scrub_move(int dx)   /* lock held */
+{
+    int64_t to = (int64_t)scrub_from + (int64_t)dx * SCRUB_SAMPLES_PER_PX;
+    int64_t total = lecture_total();
+    scrub_to = to < 0 ? 0 : to > total - RATE ? total - RATE : to;
+    timeline_show(scrub_to);
+    char t[16];
+    int32_t delta = (int32_t)scrub_to - (int32_t)scrub_from;
+    mmss(t, sizeof(t), delta < 0 ? -delta : delta);
+    if (delta < 0) lv_label_set_text_fmt(cue_label, LV_SYMBOL_PREV " %s", t);
+    else lv_label_set_text_fmt(cue_label, "%s " LV_SYMBOL_NEXT, t);
+    lv_obj_remove_flag(cue_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(cue_label);
+    int sc = lecture_scene_at(scrub_to);
+    if (sc != scrub_scene) {                          /* show where you're landing */
+        scrub_scene = sc;
+        play_final(sc);
+    }
+}
+
+static void scrub_end(void)   /* lock held */
+{
+    scrubbing = false;
+    lv_obj_add_flag(cue_label, LV_OBJ_FLAG_HIDDEN);
+    played_pos = lecture_line_start(scrub_to);
+    ESP_LOGI(TAG, "scrub %.1fs -> %.1fs", scrub_from / (float)RATE, played_pos / (float)RATE);
+    if (scrub_was_playing) {
+        play_now(played_pos);
+    } else {
+        lecture_preview(played_pos);
+        lv_obj_remove_flag(play_icon, LV_OBJ_FLAG_HIDDEN);
+        timeline_show(played_pos);
+        save_pos(played_pos);
+    }
+}
 
 static void on_swipe_up(void)   /* lock held */
 {
@@ -232,17 +345,99 @@ static void screen_event(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     lv_point_t p;
     lv_indev_get_point(lv_indev_active(), &p);
+    int dx = p.x - press_pt.x, dy = p.y - press_pt.y;
     if (code == LV_EVENT_PRESSED) {
         press_pt = p;
-        swiped = false;
+        swiped = scrubbing = false;
+    } else if (code == LV_EVENT_PRESSING) {
+        if (!scrubbing && (mode == MODE_LECTURE || mode == MODE_PAUSED) && abs(dx) > 24 && abs(dx) > 2 * abs(dy))
+            scrub_begin();
+        if (scrubbing) scrub_move(dx);
     } else if (code == LV_EVENT_RELEASED) {
-        int dx = p.x - press_pt.x, dy = p.y - press_pt.y;
         ESP_LOGI(TAG, "touch %d,%d -> %d,%d (dx %d, dy %d)", press_pt.x, press_pt.y, p.x, p.y, dx, dy);
+        if (scrubbing) {
+            scrub_end();
+            return;
+        }
         if (abs(dx) > 50 || abs(dy) > 50) swiped = true;
         if (mode != MODE_HOME && dy < -60 && abs(dy) > abs(dx)) on_swipe_up();
     } else if (code == LV_EVENT_CLICKED) {
-        if (!swiped && mode != MODE_HOME) xTaskNotifyGive(button_task_handle);
+        if (swiped) return;
+        if (mode == MODE_LECTURE) pause_now();
+        else if (mode == MODE_PAUSED) play_now(played_pos);
+        else if (mode == MODE_LISTENING) ask_done_talking();
     }
+}
+
+static void scrub_init(lv_obj_t *scr)
+{
+    scrub_panel = lv_obj_create(scr);
+    lv_obj_set_size(scrub_panel, 440, 86);
+    lv_obj_align(scrub_panel, LV_ALIGN_BOTTOM_MID, 0, -14);
+    lv_obj_set_style_bg_color(scrub_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scrub_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(scrub_panel, 0, 0);
+    lv_obj_set_style_radius(scrub_panel, 18, 0);
+    lv_obj_set_style_pad_all(scrub_panel, 0, 0);
+    lv_obj_remove_flag(scrub_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *bar = lv_obj_create(scrub_panel);                   /* track */
+    lv_obj_set_size(bar, BAR_W, 6);
+    lv_obj_set_pos(bar, BAR_X, 56);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3a3940), 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 3, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    bar_fill = lv_obj_create(scrub_panel);                        /* played part */
+    lv_obj_set_size(bar_fill, 1, 6);
+    lv_obj_set_pos(bar_fill, BAR_X, 56);
+    lv_obj_set_style_bg_color(bar_fill, lv_color_hex(0xb993ff), 0);
+    lv_obj_set_style_border_width(bar_fill, 0, 0);
+    lv_obj_set_style_radius(bar_fill, 3, 0);
+    lv_obj_remove_flag(bar_fill, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    for (int i = 1; i < lecture_scene_count(); i++) {             /* chapter ticks */
+        lv_obj_t *tick = lv_obj_create(scrub_panel);
+        lv_obj_set_size(tick, 2, 14);
+        lv_obj_set_pos(tick, BAR_X + (int)((uint64_t)lecture_scene_start(i) * BAR_W / lecture_total()), 52);
+        lv_obj_set_style_bg_color(tick, lv_color_hex(0x8a8983), 0);
+        lv_obj_set_style_border_width(tick, 0, 0);
+        lv_obj_set_style_radius(tick, 1, 0);
+        lv_obj_remove_flag(tick, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    }
+    knob = lv_obj_create(scrub_panel);
+    lv_obj_set_size(knob, 20, 20);
+    lv_obj_set_pos(knob, BAR_X - 10, 49);
+    lv_obj_set_style_bg_color(knob, lv_color_white(), 0);
+    lv_obj_set_style_border_width(knob, 0, 0);
+    lv_obj_set_style_radius(knob, LV_RADIUS_CIRCLE, 0);
+    lv_obj_remove_flag(knob, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    chap_label = text_label(scrub_panel, &lv_font_montserrat_16, 0xe8e6e1, "");
+    lv_obj_set_pos(chap_label, BAR_X, 14);
+    time_label = text_label(scrub_panel, &lv_font_montserrat_16, 0x8a8983, "");
+    lv_obj_align(time_label, LV_ALIGN_TOP_RIGHT, -BAR_X, 14);
+    lv_obj_add_flag(scrub_panel, LV_OBJ_FLAG_HIDDEN);
+
+    cue_label = text_label(scr, &lv_font_montserrat_28, 0xffffff, "");
+    lv_obj_set_style_bg_color(cue_label, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_bg_opa(cue_label, LV_OPA_80, 0);
+    lv_obj_set_style_pad_hor(cue_label, 22, 0);
+    lv_obj_set_style_pad_ver(cue_label, 12, 0);
+    lv_obj_set_style_radius(cue_label, 24, 0);
+    lv_obj_align(cue_label, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_add_flag(cue_label, LV_OBJ_FLAG_HIDDEN);
+
+    play_icon = lv_obj_create(scr);
+    lv_obj_set_size(play_icon, 96, 96);
+    lv_obj_align(play_icon, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_bg_color(play_icon, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(play_icon, LV_OPA_70, 0);
+    lv_obj_set_style_border_color(play_icon, lv_color_white(), 0);
+    lv_obj_set_style_border_width(play_icon, 3, 0);
+    lv_obj_set_style_radius(play_icon, LV_RADIUS_CIRCLE, 0);
+    lv_obj_remove_flag(play_icon, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *sym = text_label(play_icon, &lv_font_montserrat_28, 0xffffff, LV_SYMBOL_PLAY);
+    lv_obj_align(sym, LV_ALIGN_CENTER, 4, 0);
+    lv_obj_add_flag(play_icon, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void ui_init(void)
@@ -291,6 +486,7 @@ static void ui_init(void)
     lv_obj_add_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_add_event_cb(scr, screen_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scr, screen_event, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(scr, screen_event, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(scr, screen_event, LV_EVENT_CLICKED, NULL);
     home_init(scr);
@@ -310,6 +506,7 @@ static void ask_pressed(void)
     ask_cancel();
     play_flush();
     ui_lock();
+    timeline_hide();
     ui_set_sub("");
     ui_set_mode(MODE_LISTENING);
     ui_unlock();
@@ -346,7 +543,7 @@ static void button_task(void *arg)
     bool ask_down = false, vol_down = false, vol_held = false;
     TickType_t ask_at = 0, vol_at = 0, last_save = 0;
     for (;;) {
-        bool tapped = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0;
+        vTaskDelay(pdMS_TO_TICKS(10));
         TickType_t now = xTaskGetTickCount();
 
         /* side button: press to ask (it stops when you pause), or hold while talking and release */
@@ -358,7 +555,6 @@ static void button_task(void *arg)
             ask_done_talking();
         }
         ask_down = down;
-        if (tapped) ask_pressed();
 
         /* BOOT: tap for volume, hold 1.5 s for home */
         bool vdown = gpio_get_level(VOLUME_GPIO) == 0;
@@ -426,6 +622,9 @@ void app_main(void)
     audio_init();
     player_init();
     have_lecture = lecture_init();
+    ui_lock();
+    scrub_init(lv_screen_active());                 /* needs the lecture's chapters for its ticks */
+    ui_unlock();
     ask_init();
     xTaskCreatePinnedToCore(button_task, "button", 4096, NULL, 5, &button_task_handle, 1);
     net_init();

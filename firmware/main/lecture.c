@@ -307,3 +307,33 @@ void lecture_stop(void)
     play_gen++;
     for (int i = 0; i < 40 && running; i++) vTaskDelay(pdMS_TO_TICKS(5));
 }
+
+/* ---------------------------------------------------------------- timeline helpers (scrubbing) */
+
+int lecture_scene_at(uint32_t pos) { return H ? scene_at(pos) : 0; }
+uint32_t lecture_scene_start(int i) { return scenes[i].start; }
+uint32_t lecture_line_start(uint32_t pos) { return H ? line_start(pos) : 0; }
+
+const char *lecture_scene_name(int i)
+{
+    static char name[24];
+    const char *id = scenes[i].id, *dash = strchr(id, '-');
+    strlcpy(name, dash ? dash + 1 : id, sizeof(name));
+    for (char *c = name; *c; c++)
+        if (*c == '-') *c = ' ';
+    if (name[0] >= 'a' && name[0] <= 'z') name[0] -= 32;
+    return name;
+}
+
+void lecture_preview(uint32_t pos)
+{
+    if (!H) return;
+    uint32_t start = line_start(pos);
+    int s = scene_at(start);
+    uint32_t k = start > scenes[s].start
+                     ? (uint32_t)(((uint64_t)(start - scenes[s].start) * H->fps + H->rate - 1) / H->rate) : 0;
+    play_key(s, k);
+    const char *text = "";
+    for (int i = 0; i < H->n_subs && subs[i].at <= start; i++) text = strings + subs[i].text;
+    play_sub(text);
+}

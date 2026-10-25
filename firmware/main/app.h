@@ -19,7 +19,8 @@
 #define IMG_W      480
 #define ANSWER_POS 0xFFFFFFFFu
 
-typedef enum { MODE_IDLE, MODE_LECTURE, MODE_LISTENING, MODE_THINKING, MODE_ANSWERING, MODE_DONE, MODE_HOME } app_mode_t;
+typedef enum { MODE_IDLE, MODE_LECTURE, MODE_LISTENING, MODE_THINKING, MODE_ANSWERING, MODE_DONE, MODE_HOME,
+               MODE_PAUSED } app_mode_t;
 extern volatile app_mode_t mode;
 extern esp_codec_dev_handle_t spk, mic;
 
@@ -56,6 +57,11 @@ int lecture_scene_count(void);
 const char *lecture_scene_id(int i);
 const char *lecture_scene_desc(int i);
 int lecture_scene_find(const char *id);
+int lecture_scene_at(uint32_t pos);
+uint32_t lecture_scene_start(int i);
+const char *lecture_scene_name(int i);    /* "02-waves" -> "Waves" */
+uint32_t lecture_line_start(uint32_t pos);
+void lecture_preview(uint32_t pos);       /* paused: show the frame + subtitle at pos without playing */
 void video_apply(int scene, int frame);     /* lock taken inside */
 void video_seek(int scene, int frame);
 void video_final(int scene);
