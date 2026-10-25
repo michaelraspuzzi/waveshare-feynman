@@ -11,7 +11,8 @@ Hardware: [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP3
 | Control | Action |
 |---|---|
 | Side button | Press to ask a question; it stops listening when you pause. Or hold it while you talk and let go. |
-| Tap the screen | Same as the side button. |
+| Tap the screen | Pause / play. |
+| Drag left / right | Rewind / fast-forward. A timeline shows the target time and chapter, and crossing chapters previews their diagram. |
 | Two swipes up | Home: pauses, and the card resumes where you were. |
 | BOOT | Tap to cycle volume. Hold 1.5 s to go home. |
 
